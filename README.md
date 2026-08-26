@@ -5,7 +5,6 @@
 Apps in Toss 미니앱 
 
 개발자센터: https://developers-apps-in-toss.toss.im
-
 콘솔: https://apps-in-toss.toss.im
 
 ---
