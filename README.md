@@ -3,7 +3,9 @@
 > 친구와 **하찮은 물건에 한마디를 담아 주고받으며, 둘만의 사소한 기록을 쌓아가는 관계형 수집 서비스**입니다.
 
 Apps in Toss 미니앱 
+
 개발자센터: https://developers-apps-in-toss.toss.im
+
 콘솔: https://apps-in-toss.toss.im
 
 ---
