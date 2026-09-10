@@ -1,8 +1,13 @@
 import { createRoute } from '@granite-js/react-native';
+import {
+  fetchAlbumPhotos,
+  FetchAlbumPhotosPermissionError,
+} from '@apps-in-toss/framework';
 import type React from 'react';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -36,9 +41,6 @@ type AppScreen =
   | 'sent';
 type StorageTab = 'received' | 'together';
 
-const DEFAULT_MESSAGE =
-  '벌써 가을이야.. 낙엽을 주웠어!\n날씨 많이 추워졌더라\n옷 잘 챙겨입구 감기 조심해~~';
-
 export const Route = createRoute('/', {
   component: ForYouPage,
 });
@@ -47,10 +49,22 @@ function ForYouPage() {
   const [screen, setScreen] = useState<AppScreen>('home');
   const [tab, setTab] = useState<StorageTab>('received');
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [messageOpen, setMessageOpen] = useState(false);
   const [dailySent, setDailySent] = useState(false);
-  const [message, setMessage] = useState(DEFAULT_MESSAGE);
+  const [message, setMessage] = useState('');
+  const [recipientName, setRecipientName] = useState('민서');
   const [willFail, setWillFail] = useState(false);
+  const [selectedPhotoUri, setSelectedPhotoUri] = useState<string | null>(null);
+  const [sentGiftImageUri, setSentGiftImageUri] = useState<string | null>(null);
+
+  // 이후 서버에서 선물 목록을 받아오면 이 두 값만 실제 목록 길이로 바꾸면 됩니다.
+  const receivedGiftCount = 0;
+  const sentGiftCount = dailySent ? 1 : 0;
+  const togetherGiftCount = receivedGiftCount + sentGiftCount;
+  const headline = getStorageHeadline(
+    tab,
+    receivedGiftCount,
+    togetherGiftCount,
+  );
 
   useEffect(() => {
     if (screen !== 'extracting') return;
@@ -71,6 +85,8 @@ function ForYouPage() {
     if (screen !== 'sent') return;
     const timer = setTimeout(() => {
       setDailySent(true);
+      setSentGiftImageUri(selectedPhotoUri);
+      setTab('together');
       setScreen('home');
     }, 1500);
     return () => clearTimeout(timer);
@@ -80,6 +96,39 @@ function ForYouPage() {
     setWillFail(fail);
     setPickerOpen(false);
     setScreen('extracting');
+  };
+
+  const selectPhotoFromAlbum = async () => {
+    // iOS에서는 현재 모달이 완전히 닫힌 뒤 사진첩을 열어야 합니다.
+    setPickerOpen(false);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    try {
+      const photos = await fetchAlbumPhotos({
+        maxCount: 1,
+        maxWidth: 1024,
+        base64: true,
+      });
+      const photo = photos[0];
+
+      if (photo == null) {
+        setPickerOpen(false);
+        return;
+      }
+
+      setSelectedPhotoUri(`data:image/jpeg;base64,${photo.dataUri}`);
+      startExtraction(false);
+    } catch (error) {
+      if (error instanceof FetchAlbumPhotosPermissionError) {
+        Alert.alert(
+          '사진 접근이 필요해요',
+          '선물할 물건의 사진을 고르려면 사진 접근을 허용해주세요.',
+        );
+        return;
+      }
+
+      Alert.alert('사진을 불러오지 못했어요', '잠시 후 다시 시도해주세요.');
+    }
   };
 
   if (screen === 'extracting') {
@@ -117,7 +166,7 @@ function ForYouPage() {
           visible={pickerOpen}
           onClose={() => setPickerOpen(false)}
           onCamera={() => startExtraction(true)}
-          onAlbum={() => startExtraction(false)}
+          onAlbum={selectPhotoFromAlbum}
         />
       </View>
     );
@@ -129,7 +178,9 @@ function ForYouPage() {
         <View style={styles.centerScreen}>
           <Text style={styles.screenTitle}>보내고 싶은 선물이 맞나요?</Text>
           <Image
-            source={leafLarge}
+            source={
+              selectedPhotoUri == null ? leafLarge : { uri: selectedPhotoUri }
+            }
             style={styles.largeLeaf}
             resizeMode="contain"
           />
@@ -152,7 +203,7 @@ function ForYouPage() {
           visible={pickerOpen}
           onClose={() => setPickerOpen(false)}
           onCamera={() => startExtraction(true)}
-          onAlbum={() => startExtraction(false)}
+          onAlbum={selectPhotoFromAlbum}
         />
       </AppScaffold>
     );
@@ -165,31 +216,44 @@ function ForYouPage() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <SafeAreaView style={styles.messageScreen}>
-          <Text style={styles.messageTitle}>
-            함께 보낼 메시지를 입력해주세요
-          </Text>
-          <Text style={styles.recipient}>To. 민서 ..♥</Text>
-          <TextInput
-            autoFocus
-            multiline
-            maxLength={120}
-            value={message}
-            onChangeText={setMessage}
-            placeholder="선물과 함께 보낼 말을 적어주세요"
-            placeholderTextColor="#9AA3AE"
-            style={styles.messageInput}
-          />
-          <Text style={styles.messageCount}>{message.length}/120</Text>
-          <Pressable
-            disabled={!message.trim()}
-            style={[
-              styles.wideButton,
-              !message.trim() && styles.disabledButton,
-            ]}
-            onPress={() => setScreen('review')}
-          >
-            <Text style={styles.primaryButtonText}>입력 완료</Text>
-          </Pressable>
+          <View style={styles.messageContent}>
+            <Text style={styles.messageTitle}>
+              함께 보낼 메시지를 입력해주세요
+            </Text>
+            <View style={styles.recipientRow}>
+              <Text style={styles.recipientPrefix}>To.</Text>
+              <TextInput
+                value={recipientName}
+                onChangeText={setRecipientName}
+                placeholder="받는 사람"
+                placeholderTextColor="#9AA3AE"
+                maxLength={12}
+                style={styles.recipientInput}
+              />
+              <Text style={styles.recipientHeart}>..♥</Text>
+            </View>
+            <TextInput
+              autoFocus
+              multiline
+              maxLength={120}
+              value={message}
+              onChangeText={setMessage}
+              placeholder="선물과 함께 보낼 말을 적어주세요"
+              placeholderTextColor="#9AA3AE"
+              style={styles.messageInput}
+            />
+            <Text style={styles.messageCount}>{message.length}/120</Text>
+            <Pressable
+              disabled={!message.trim()}
+              style={[
+                styles.wideButton,
+                !message.trim() && styles.disabledButton,
+              ]}
+              onPress={() => setScreen('review')}
+            >
+              <Text style={styles.primaryButtonText}>입력 완료</Text>
+            </Pressable>
+          </View>
         </SafeAreaView>
       </KeyboardAvoidingView>
     );
@@ -200,7 +264,7 @@ function ForYouPage() {
       <AppScaffold>
         <View style={styles.reviewScreen}>
           <Text style={styles.screenTitle}>메시지 입력을 완료하셨나요?</Text>
-          <MessageCard message={message} />
+          <MessageCard recipientName={recipientName} message={message} />
           <View style={styles.reviewBottom}>
             <Pressable
               style={styles.wideButton}
@@ -246,15 +310,13 @@ function ForYouPage() {
     <AppScaffold>
       <View style={styles.home}>
         <SegmentedControl tab={tab} onChange={setTab} />
-        <Text style={styles.homeHeadline}>
-          {tab === 'received'
-            ? '민서에게 받은 선물이 벌써 4개나 쌓였어요!'
-            : '서로 주고받은 선물이 벌써 5개나 모였어요'}
-        </Text>
+        <Text style={styles.homeHeadline}>{headline}</Text>
         <GiftStorage
           showShared={tab === 'together'}
-          hasNewGift={!messageOpen}
-          onGiftPress={() => setMessageOpen(true)}
+          giftCount={
+            tab === 'received' ? receivedGiftCount : togetherGiftCount
+          }
+          giftImageUri={tab === 'together' ? sentGiftImageUri : null}
         />
         <View style={styles.homeBottom}>
           <Pressable
@@ -275,13 +337,15 @@ function ForYouPage() {
       </View>
       <PhotoPicker
         visible={pickerOpen}
+        canDeleteTodayGift={dailySent}
         onClose={() => setPickerOpen(false)}
         onCamera={() => startExtraction(true)}
-        onAlbum={() => startExtraction(false)}
-      />
-      <ReceivedMessage
-        visible={messageOpen}
-        onClose={() => setMessageOpen(false)}
+        onAlbum={selectPhotoFromAlbum}
+        onDeleteTodayGift={() => {
+          setDailySent(false);
+          setSentGiftImageUri(null);
+          setPickerOpen(false);
+        }}
       />
     </AppScaffold>
   );
@@ -291,21 +355,25 @@ function AppScaffold({ children }: { children: React.ReactNode }) {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-      <View style={styles.header}>
-        <Text style={styles.back}>‹</Text>
-        <View style={styles.appTitle}>
-          <Text style={styles.appIcon}>🎁</Text>
-          <Text style={styles.appName}>오다 주웠어..</Text>
-        </View>
-        <View style={styles.headerActions}>
-          <Text style={styles.headerAction}>♥</Text>
-          <Text style={styles.headerAction}>•••</Text>
-          <Text style={styles.headerAction}>×</Text>
-        </View>
-      </View>
       {children}
     </SafeAreaView>
   );
+}
+
+function getStorageHeadline(
+  tab: StorageTab,
+  receivedCount: number,
+  togetherCount: number,
+) {
+  if (tab === 'received') {
+    return receivedCount === 0
+      ? '친구에게 선물을 보내고\n우리의 선물함을 시작해보세요'
+      : `친구에게 받은 선물이 벌써 ${receivedCount}개나 쌓였어요!`;
+  }
+
+  return togetherCount === 0
+    ? '첫 선물을 보내고\n함께 모은 선물함을 채워보세요'
+    : `서로 주고받은 선물이 벌써 ${togetherCount}개나 모였어요`;
 }
 
 function SegmentedControl({
@@ -346,38 +414,56 @@ function SegmentedControl({
 
 function GiftStorage({
   showShared,
-  hasNewGift,
-  onGiftPress,
-}: { showShared: boolean; hasNewGift: boolean; onGiftPress: () => void }) {
+  giftCount,
+  giftImageUri,
+}: { showShared: boolean; giftCount: number; giftImageUri: string | null }) {
+  const hasGift = giftCount > 0;
+
   return (
     <View style={styles.storage}>
       <View style={styles.storageGradient} />
       <View style={styles.storageBottom} />
-      <Pressable style={styles.leafPressable} onPress={onGiftPress}>
-        <Image
-          source={leafHome}
-          style={[styles.leaf, hasNewGift && styles.newGift]}
-          resizeMode="contain"
-        />
-      </Pressable>
-      <Image source={coffee} style={styles.coffee} resizeMode="contain" />
-      <Image source={blueberry} style={styles.blueberry} resizeMode="contain" />
-      <Image source={candy} style={styles.candy} resizeMode="contain" />
-      {showShared && <Text style={styles.sharedBadge}>+ 내가 보낸 선물</Text>}
+      {hasGift && (
+        <>
+          <Image
+            source={giftImageUri == null ? leafHome : { uri: giftImageUri }}
+            style={styles.leaf}
+            resizeMode="contain"
+          />
+          {giftCount > 1 && (
+            <Image source={coffee} style={styles.coffee} resizeMode="contain" />
+          )}
+          {giftCount > 2 && (
+            <Image
+              source={blueberry}
+              style={styles.blueberry}
+              resizeMode="contain"
+            />
+          )}
+          {giftCount > 3 && (
+            <Image source={candy} style={styles.candy} resizeMode="contain" />
+          )}
+          {showShared && <Text style={styles.sharedBadge}>+ 내가 보낸 선물</Text>}
+        </>
+      )}
     </View>
   );
 }
 
 function PhotoPicker({
   visible,
+  canDeleteTodayGift = false,
   onClose,
   onCamera,
   onAlbum,
+  onDeleteTodayGift = () => undefined,
 }: {
   visible: boolean;
+  canDeleteTodayGift?: boolean;
   onClose: () => void;
   onCamera: () => void;
   onAlbum: () => void;
+  onDeleteTodayGift?: () => void;
 }) {
   return (
     <Modal
@@ -397,56 +483,39 @@ function PhotoPicker({
             <Text style={styles.sheetIcon}>🏞️</Text>
             <Text style={styles.sheetText}>앨범에서 선택하기</Text>
           </Pressable>
-          <View style={[styles.sheetOption, styles.disabledOption]}>
+          <Pressable
+            disabled={!canDeleteTodayGift}
+            style={[
+              styles.sheetOption,
+              !canDeleteTodayGift && styles.disabledOption,
+            ]}
+            onPress={onDeleteTodayGift}
+          >
             <Text style={styles.sheetIcon}>🗑️</Text>
-            <Text style={styles.disabledOptionText}>오늘 보낸 선물 지우기</Text>
-          </View>
+            <Text
+              style={
+                canDeleteTodayGift ? styles.sheetText : styles.disabledOptionText
+              }
+            >
+              오늘 보낸 선물 지우기
+            </Text>
+          </Pressable>
         </Pressable>
       </Pressable>
     </Modal>
   );
 }
 
-function ReceivedMessage({
-  visible,
-  onClose,
-}: { visible: boolean; onClose: () => void }) {
-  return (
-    <Modal
-      transparent
-      animationType="fade"
-      visible={visible}
-      onRequestClose={onClose}
-    >
-      <View style={styles.modalBackdrop}>
-        <View style={styles.receivedCard}>
-          <View style={styles.receivedHeader}>
-            <Text style={styles.recipient}>To. 민서 ..♥</Text>
-            <Pressable onPress={onClose}>
-              <Text style={styles.close}>×</Text>
-            </Pressable>
-          </View>
-          <MessageCard message={DEFAULT_MESSAGE} />
-          <Pressable
-            style={[styles.wideButton, styles.storeGiftButton]}
-            onPress={onClose}
-          >
-            <Text style={styles.primaryButtonText}>선물함에 넣기</Text>
-          </Pressable>
-        </View>
-      </View>
-    </Modal>
-  );
-}
-
-function MessageCard({ message }: { message: string }) {
+function MessageCard({
+  recipientName,
+  message,
+}: { recipientName: string; message: string }) {
   return (
     <View style={styles.messageBlock}>
-      <Text style={styles.recipient}>To. 민서 ..♥</Text>
+      <Text style={styles.recipient}>To. {recipientName} ..♥</Text>
       <View style={styles.messageBox}>
         <Text style={styles.messageBody}>{message}</Text>
       </View>
-      <Text style={styles.date}>2026-09-10 13:10</Text>
     </View>
   );
 }
@@ -474,28 +543,6 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#FFFFFF' },
   fullScreen: { flex: 1, backgroundColor: '#FFFFFF' },
   hiddenText: { width: 1, height: 1, opacity: 0 },
-  header: {
-    height: 54,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-  },
-  back: { width: 28, fontSize: 36, lineHeight: 40, color: '#191F28' },
-  appTitle: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
-  appIcon: { fontSize: 16 },
-  appName: { fontSize: 15, fontWeight: '600', color: '#191F28' },
-  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  headerAction: {
-    minWidth: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: '#F7F8FA',
-    textAlign: 'center',
-    lineHeight: 34,
-    color: '#6B7684',
-    fontSize: 17,
-    fontWeight: '600',
-  },
   home: { flex: 1, paddingHorizontal: 20 },
   segmented: {
     marginTop: 22,
@@ -545,7 +592,7 @@ const styles = StyleSheet.create({
   },
   storageGradient: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#FFF8F9',
+    backgroundColor: '#FEF8F8',
   },
   storageBottom: {
     position: 'absolute',
@@ -553,9 +600,9 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     height: 70,
-    backgroundColor: '#F9D6D6',
+    backgroundColor: '#FEF8F8',
   },
-  leafPressable: {
+  leaf: {
     position: 'absolute',
     left: 4,
     bottom: -5,
@@ -563,8 +610,6 @@ const styles = StyleSheet.create({
     height: 126,
     zIndex: 3,
   },
-  leaf: { width: 120, height: 126 },
-  newGift: { borderColor: '#FF5F95', borderWidth: 2, borderRadius: 16 },
   coffee: {
     position: 'absolute',
     left: 61,
@@ -658,10 +703,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 16,
   },
-  messageScreen: { flex: 1, backgroundColor: '#FFFFFF', paddingHorizontal: 20 },
+  messageScreen: { flex: 1, backgroundColor: '#FFFFFF' },
+  messageContent: { flex: 1, paddingHorizontal: 24, paddingTop: 40 },
   messageTitle: {
-    marginTop: 8,
-    marginBottom: 30,
+    marginBottom: 36,
     fontSize: 18,
     fontWeight: '700',
     color: '#111111',
@@ -673,6 +718,24 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginBottom: 8,
   },
+  recipientRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  recipientPrefix: { color: '#4E5968', fontSize: 14, fontWeight: '600' },
+  recipientInput: {
+    minWidth: 52,
+    maxWidth: 150,
+    paddingHorizontal: 5,
+    paddingVertical: 3,
+    borderBottomWidth: 1,
+    borderBottomColor: '#DDE1E6',
+    color: '#4E5968',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  recipientHeart: { color: '#4E5968', fontSize: 14, fontWeight: '600' },
   messageInput: {
     minHeight: 136,
     borderWidth: 1,
@@ -708,9 +771,14 @@ const styles = StyleSheet.create({
   },
   date: { color: '#8B95A1', fontSize: 14, marginTop: 10 },
   reviewBottom: { marginTop: 'auto', marginBottom: 7 },
-  progressScreen: { flex: 1, alignItems: 'center', backgroundColor: '#FFFFFF' },
+  progressScreen: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+  },
   progressTitle: {
-    marginTop: 14,
+    marginTop: -60,
     fontSize: 18,
     fontWeight: '700',
     color: '#111111',

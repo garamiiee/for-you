@@ -11,7 +11,7 @@ export default defineConfig({
         primaryColor: '#FF5F95',
         icon: '', // 화면에 노출될 앱의 아이콘 이미지 주소로 바꿔주세요.
       },
-      permissions: [],
+      permissions: [{ name: 'photos', access: 'read' }],
     }),
   ],
 });
