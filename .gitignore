@@ -15,3 +15,10 @@ yarn-error.log
 .granite
 .swc
 .DS_Store
+.omc/
+
+# 빌드 산출물 / 에이전트 도구 흔적
+for-you.ait
+.agents/
+skills-lock.json
+.claude/
