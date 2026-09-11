@@ -1,8 +1,10 @@
-import { createRoute } from '@granite-js/react-native';
 import {
-  fetchAlbumPhotos,
   FetchAlbumPhotosPermissionError,
+  OpenCameraPermissionError,
+  fetchAlbumPhotos,
+  openCamera,
 } from '@apps-in-toss/framework';
+import { createRoute } from '@granite-js/react-native';
 import type React from 'react';
 import { useEffect, useState } from 'react';
 import {
@@ -20,6 +22,23 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { extractObject } from '../lib/api';
+import { isApiConfigured } from '../lib/config';
+import {
+  type Friend,
+  acceptInvite,
+  createInvite,
+  getFriend,
+  normalizeCode,
+  shareInvite,
+} from '../lib/friends';
+import {
+  type GiftBox,
+  deleteTodayGift,
+  hasSentToday,
+  listGifts,
+  sendGift,
+} from '../lib/gifts';
 
 const leafHome = require('../../assets/leaf-home.png');
 const coffee = require('../../assets/coffee.png');
@@ -38,28 +57,39 @@ type AppScreen =
   | 'message'
   | 'review'
   | 'sending'
-  | 'sent';
+  | 'sent'
+  | 'friend';
 type StorageTab = 'received' | 'together';
 
 export const Route = createRoute('/', {
+  // 공유 링크는 intoss://for-you?inviteCode=AB23CD 형태로 코드를 실어 보내요.
+  // 다만 intoss:// 딥링크는 정식 출시 후에만 열려서, 출시 전에는 코드 직접
+  // 입력만 동작해요.
+  validateParams: (params) => params as { inviteCode?: string },
   component: ForYouPage,
 });
 
 function ForYouPage() {
+  const { inviteCode } = Route.useParams();
   const [screen, setScreen] = useState<AppScreen>('home');
   const [tab, setTab] = useState<StorageTab>('received');
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [dailySent, setDailySent] = useState(false);
+  const [giftBox, setGiftBox] = useState<GiftBox>({ received: [], sent: [] });
   const [message, setMessage] = useState('');
   const [recipientName, setRecipientName] = useState('민서');
-  const [willFail, setWillFail] = useState(false);
+  const [lastPhotoBase64, setLastPhotoBase64] = useState<string | null>(null);
   const [selectedPhotoUri, setSelectedPhotoUri] = useState<string | null>(null);
-  const [sentGiftImageUri, setSentGiftImageUri] = useState<string | null>(null);
+  const [friend, setFriend] = useState<Friend | null>(null);
+  const [myCode, setMyCode] = useState<string | null>(null);
+  const [codeInput, setCodeInput] = useState('');
+  const [friendBusy, setFriendBusy] = useState(false);
+  const [friendError, setFriendError] = useState<string | null>(null);
 
-  // 이후 서버에서 선물 목록을 받아오면 이 두 값만 실제 목록 길이로 바꾸면 됩니다.
-  const receivedGiftCount = 0;
-  const sentGiftCount = dailySent ? 1 : 0;
-  const togetherGiftCount = receivedGiftCount + sentGiftCount;
+  const receivedGiftCount = giftBox.received.length;
+  const togetherGiftCount = receivedGiftCount + giftBox.sent.length;
+  const dailySent = hasSentToday(giftBox.sent);
+  const latestReceivedUri = giftBox.received[0]?.imageUrl ?? null;
+  const latestSentUri = giftBox.sent[0]?.imageUrl ?? null;
   const headline = getStorageHeadline(
     tab,
     receivedGiftCount,
@@ -67,41 +97,196 @@ function ForYouPage() {
   );
 
   useEffect(() => {
-    if (screen !== 'extracting') return;
-    const timer = setTimeout(
-      () => setScreen(willFail ? 'failed' : 'confirm'),
-      1500,
-    );
-    return () => clearTimeout(timer);
-  }, [screen, willFail]);
+    let cancelled = false;
 
+    getFriend()
+      .then((loaded) => {
+        if (!cancelled) setFriend(loaded);
+      })
+      .catch((error) => {
+        console.error('[friends] 친구 조회 실패', error);
+      });
+
+    listGifts()
+      .then((loaded) => {
+        if (!cancelled) setGiftBox(loaded);
+      })
+      .catch((error) => {
+        console.error('[gifts] 목록 조회 실패', error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 공유 링크로 들어온 경우 코드를 미리 채우고 친구 화면을 열어줘요.
   useEffect(() => {
-    if (screen !== 'sending') return;
-    const timer = setTimeout(() => setScreen('sent'), 1500);
-    return () => clearTimeout(timer);
-  }, [screen]);
+    if (inviteCode == null) return;
+
+    const normalized = normalizeCode(inviteCode);
+    if (normalized.length !== 6) return;
+
+    setCodeInput(normalized);
+    setFriendError(null);
+    setScreen('friend');
+  }, [inviteCode]);
 
   useEffect(() => {
     if (screen !== 'sent') return;
     const timer = setTimeout(() => {
-      setDailySent(true);
-      setSentGiftImageUri(selectedPhotoUri);
       setTab('together');
       setScreen('home');
+      setMessage('');
+      setSelectedPhotoUri(null);
+      setLastPhotoBase64(null);
     }, 1500);
     return () => clearTimeout(timer);
   }, [screen]);
 
-  const startExtraction = (fail: boolean) => {
-    setWillFail(fail);
+  const runExtraction = async (base64: string) => {
+    setLastPhotoBase64(base64);
     setPickerOpen(false);
     setScreen('extracting');
+
+    // 서버 URL을 채우기 전까지는 기존 목업 동작을 그대로 씁니다.
+    if (!isApiConfigured()) {
+      await delay(1500);
+      setSelectedPhotoUri(`data:image/jpeg;base64,${base64}`);
+      setScreen('confirm');
+      return;
+    }
+
+    try {
+      setSelectedPhotoUri(await extractObject(base64));
+      setScreen('confirm');
+    } catch (error) {
+      console.error('[extract] 추출 실패', error);
+      setScreen('failed');
+    }
+  };
+
+  const retryExtraction = () => {
+    if (lastPhotoBase64 == null) {
+      setPickerOpen(true);
+      return;
+    }
+    runExtraction(lastPhotoBase64);
+  };
+
+  const takePhoto = async () => {
+    // iOS 에서는 현재 모달이 완전히 닫힌 뒤 카메라를 열어야 합니다.
+    setPickerOpen(false);
+    await delay(350);
+
+    try {
+      const photo = await openCamera({ base64: true, maxWidth: 1024 });
+      if (photo?.dataUri == null) return;
+
+      await runExtraction(photo.dataUri);
+    } catch (error) {
+      if (error instanceof OpenCameraPermissionError) {
+        Alert.alert(
+          '카메라 접근이 필요해요',
+          '선물할 물건을 찍으려면 카메라 접근을 허용해주세요.',
+        );
+        return;
+      }
+
+      console.error('[camera] 촬영 실패', error);
+      Alert.alert('사진을 찍지 못했어요', '잠시 후 다시 시도해주세요.');
+    }
+  };
+
+  const refreshGifts = async () => {
+    try {
+      setGiftBox(await listGifts());
+    } catch (error) {
+      console.error('[gifts] 목록 조회 실패', error);
+    }
+  };
+
+  const submitGift = async () => {
+    if (selectedPhotoUri == null) return;
+
+    setScreen('sending');
+
+    try {
+      await sendGift(selectedPhotoUri, message);
+      await refreshGifts();
+      setScreen('sent');
+    } catch (error) {
+      setScreen('review');
+      Alert.alert(
+        '선물을 보내지 못했어요',
+        toMessage(error, '잠시 후 다시 시도해주세요.'),
+      );
+    }
+  };
+
+  const cancelTodayGift = async () => {
+    setPickerOpen(false);
+
+    try {
+      await deleteTodayGift();
+      await refreshGifts();
+    } catch (error) {
+      Alert.alert(
+        '선물을 취소하지 못했어요',
+        toMessage(error, '잠시 후 다시 시도해주세요.'),
+      );
+    }
+  };
+
+  const openFriendScreen = () => {
+    setFriendError(null);
+    setCodeInput('');
+    setScreen('friend');
+  };
+
+  const issueMyCode = async () => {
+    setFriendBusy(true);
+    setFriendError(null);
+
+    try {
+      const invite = await createInvite();
+      setMyCode(invite.code);
+    } catch (error) {
+      setFriendError(toMessage(error, '초대 코드를 만들지 못했어요.'));
+    } finally {
+      setFriendBusy(false);
+    }
+  };
+
+  const shareMyCode = async () => {
+    if (myCode == null) return;
+
+    try {
+      await shareInvite(myCode);
+    } catch (error) {
+      setFriendError(toMessage(error, '공유 시트를 열지 못했어요.'));
+    }
+  };
+
+  const connectWithCode = async () => {
+    setFriendBusy(true);
+    setFriendError(null);
+
+    try {
+      setFriend(await acceptInvite(codeInput));
+      setCodeInput('');
+      setScreen('home');
+    } catch (error) {
+      setFriendError(toMessage(error, '친구와 연결하지 못했어요.'));
+    } finally {
+      setFriendBusy(false);
+    }
   };
 
   const selectPhotoFromAlbum = async () => {
     // iOS에서는 현재 모달이 완전히 닫힌 뒤 사진첩을 열어야 합니다.
     setPickerOpen(false);
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    await delay(350);
 
     try {
       const photos = await fetchAlbumPhotos({
@@ -116,8 +301,7 @@ function ForYouPage() {
         return;
       }
 
-      setSelectedPhotoUri(`data:image/jpeg;base64,${photo.dataUri}`);
-      startExtraction(false);
+      await runExtraction(photo.dataUri);
     } catch (error) {
       if (error instanceof FetchAlbumPhotosPermissionError) {
         Alert.alert(
@@ -157,7 +341,7 @@ function ForYouPage() {
           </Pressable>
           <Pressable
             style={[styles.halfButton, styles.primaryButton]}
-            onPress={() => startExtraction(false)}
+            onPress={retryExtraction}
           >
             <Text style={styles.primaryButtonText}>다시 시도</Text>
           </Pressable>
@@ -165,7 +349,7 @@ function ForYouPage() {
         <PhotoPicker
           visible={pickerOpen}
           onClose={() => setPickerOpen(false)}
-          onCamera={() => startExtraction(true)}
+          onCamera={takePhoto}
           onAlbum={selectPhotoFromAlbum}
         />
       </View>
@@ -202,7 +386,7 @@ function ForYouPage() {
         <PhotoPicker
           visible={pickerOpen}
           onClose={() => setPickerOpen(false)}
-          onCamera={() => startExtraction(true)}
+          onCamera={takePhoto}
           onAlbum={selectPhotoFromAlbum}
         />
       </AppScaffold>
@@ -266,10 +450,7 @@ function ForYouPage() {
           <Text style={styles.screenTitle}>메시지 입력을 완료하셨나요?</Text>
           <MessageCard recipientName={recipientName} message={message} />
           <View style={styles.reviewBottom}>
-            <Pressable
-              style={styles.wideButton}
-              onPress={() => setScreen('sending')}
-            >
+            <Pressable style={styles.wideButton} onPress={submitGift}>
               <Text style={styles.primaryButtonText}>이대로 보낼래요</Text>
             </Pressable>
             <Pressable
@@ -282,6 +463,26 @@ function ForYouPage() {
             </Pressable>
           </View>
         </View>
+      </AppScaffold>
+    );
+  }
+
+  if (screen === 'friend') {
+    return (
+      <AppScaffold>
+        <FriendScreen
+          friend={friend}
+          myCode={myCode}
+          codeInput={codeInput}
+          busy={friendBusy}
+          error={friendError}
+          serverConnected={isApiConfigured()}
+          onChangeCode={(next) => setCodeInput(normalizeCode(next))}
+          onIssueCode={issueMyCode}
+          onShareCode={shareMyCode}
+          onConnect={connectWithCode}
+          onBack={() => setScreen('home')}
+        />
       </AppScaffold>
     );
   }
@@ -313,14 +514,19 @@ function ForYouPage() {
         <Text style={styles.homeHeadline}>{headline}</Text>
         <GiftStorage
           showShared={tab === 'together'}
-          giftCount={
-            tab === 'received' ? receivedGiftCount : togetherGiftCount
+          giftCount={tab === 'received' ? receivedGiftCount : togetherGiftCount}
+          giftImageUri={
+            tab === 'received'
+              ? latestReceivedUri
+              : (latestSentUri ?? latestReceivedUri)
           }
-          giftImageUri={tab === 'together' ? sentGiftImageUri : null}
         />
         <View style={styles.homeBottom}>
+          {/*
+            이미 보낸 뒤에도 시트는 열려야 해요. '오늘 보낸 선물 지우기' 로
+            들어가는 길이 이것뿐이라서, 비활성처럼 보이지만 눌립니다.
+          */}
           <Pressable
-            disabled={dailySent}
             style={[styles.wideButton, dailySent && styles.disabledButton]}
             onPress={() => setPickerOpen(true)}
           >
@@ -328,9 +534,11 @@ function ForYouPage() {
               {dailySent ? '오늘은 이미 선물을 보냈어요' : '나도 선물하러 가기'}
             </Text>
           </Pressable>
-          <Pressable style={styles.textButton}>
+          <Pressable style={styles.textButton} onPress={openFriendScreen}>
             <Text style={styles.textButtonLabel}>
-              선물할 친구를 변경하고 싶어요 〉
+              {friend == null
+                ? '선물할 친구를 초대할래요 〉'
+                : '선물할 친구를 변경하고 싶어요 〉'}
             </Text>
           </Pressable>
         </View>
@@ -339,16 +547,142 @@ function ForYouPage() {
         visible={pickerOpen}
         canDeleteTodayGift={dailySent}
         onClose={() => setPickerOpen(false)}
-        onCamera={() => startExtraction(true)}
+        onCamera={takePhoto}
         onAlbum={selectPhotoFromAlbum}
-        onDeleteTodayGift={() => {
-          setDailySent(false);
-          setSentGiftImageUri(null);
-          setPickerOpen(false);
-        }}
+        onDeleteTodayGift={cancelTodayGift}
       />
     </AppScaffold>
   );
+}
+
+function FriendScreen({
+  friend,
+  myCode,
+  codeInput,
+  busy,
+  error,
+  serverConnected,
+  onChangeCode,
+  onIssueCode,
+  onShareCode,
+  onConnect,
+  onBack,
+}: {
+  friend: Friend | null;
+  myCode: string | null;
+  codeInput: string;
+  busy: boolean;
+  error: string | null;
+  serverConnected: boolean;
+  onChangeCode: (next: string) => void;
+  onIssueCode: () => void;
+  onShareCode: () => void;
+  onConnect: () => void;
+  onBack: () => void;
+}) {
+  if (friend != null) {
+    return (
+      <View style={styles.friendScreen}>
+        <Text style={styles.screenTitle}>이미 친구와 연결됐어요</Text>
+        <Text style={styles.friendNote}>
+          연결한 친구와만 선물을 주고받아요.
+        </Text>
+        <View style={styles.friendBottom}>
+          <Pressable style={styles.wideButton} onPress={onBack}>
+            <Text style={styles.primaryButtonText}>선물함으로 돌아가기</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.friendScreen}>
+      <Text style={styles.screenTitle}>친구와 선물함을 연결해요</Text>
+
+      <View style={styles.friendSection}>
+        <Text style={styles.friendSectionTitle}>내 초대 코드</Text>
+        {myCode == null ? (
+          <Pressable
+            disabled={busy}
+            style={[styles.wideButton, busy && styles.disabledButton]}
+            onPress={onIssueCode}
+          >
+            <Text style={styles.primaryButtonText}>초대 코드 만들기</Text>
+          </Pressable>
+        ) : (
+          <>
+            <View style={styles.codeBox}>
+              <Text style={styles.codeText}>{myCode}</Text>
+            </View>
+            <View style={styles.rowButtons}>
+              <Pressable
+                style={[styles.halfButton, styles.secondaryButton]}
+                onPress={onIssueCode}
+              >
+                <Text style={styles.secondaryButtonText}>새로 만들기</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.halfButton, styles.primaryButton]}
+                onPress={onShareCode}
+              >
+                <Text style={styles.primaryButtonText}>공유하기</Text>
+              </Pressable>
+            </View>
+          </>
+        )}
+      </View>
+
+      <View style={styles.friendSection}>
+        <Text style={styles.friendSectionTitle}>친구 코드 입력</Text>
+        <TextInput
+          value={codeInput}
+          onChangeText={onChangeCode}
+          placeholder="6자리 코드"
+          placeholderTextColor="#9AA3AE"
+          autoCapitalize="characters"
+          autoCorrect={false}
+          maxLength={6}
+          style={styles.codeInput}
+        />
+        <Pressable
+          disabled={busy || codeInput.length !== 6}
+          style={[
+            styles.wideButton,
+            (busy || codeInput.length !== 6) && styles.disabledButton,
+          ]}
+          onPress={onConnect}
+        >
+          <Text style={styles.primaryButtonText}>
+            {busy ? '연결하는 중...' : '연결하기'}
+          </Text>
+        </Pressable>
+      </View>
+
+      {error != null && <Text style={styles.friendError}>{error}</Text>}
+
+      {!serverConnected && (
+        <Text style={styles.friendNote}>
+          서버 연결 전이라 이 기기에서만 저장돼요.
+        </Text>
+      )}
+
+      <Pressable style={styles.textButton} onPress={onBack}>
+        <Text style={styles.textButtonLabel}>나중에 할래요 〉</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+/** 서버가 준 메시지를 그대로 보여주고, 없으면 기본 문구로 대체해요. */
+function toMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.length > 0
+    ? error.message
+    : fallback;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function AppScaffold({ children }: { children: React.ReactNode }) {
@@ -443,7 +777,9 @@ function GiftStorage({
           {giftCount > 3 && (
             <Image source={candy} style={styles.candy} resizeMode="contain" />
           )}
-          {showShared && <Text style={styles.sharedBadge}>+ 내가 보낸 선물</Text>}
+          {showShared && (
+            <Text style={styles.sharedBadge}>+ 내가 보낸 선물</Text>
+          )}
         </>
       )}
     </View>
@@ -494,7 +830,9 @@ function PhotoPicker({
             <Text style={styles.sheetIcon}>🗑️</Text>
             <Text
               style={
-                canDeleteTodayGift ? styles.sheetText : styles.disabledOptionText
+                canDeleteTodayGift
+                  ? styles.sheetText
+                  : styles.disabledOptionText
               }
             >
               오늘 보낸 선물 지우기
@@ -543,6 +881,54 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#FFFFFF' },
   fullScreen: { flex: 1, backgroundColor: '#FFFFFF' },
   hiddenText: { width: 1, height: 1, opacity: 0 },
+  friendScreen: { flex: 1, paddingHorizontal: 20 },
+  friendSection: { marginTop: 28 },
+  friendSectionTitle: {
+    marginBottom: 10,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#6B7684',
+  },
+  codeBox: {
+    minHeight: 64,
+    borderRadius: 16,
+    backgroundColor: '#F4F6F8',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  codeText: {
+    fontSize: 28,
+    fontWeight: '700',
+    letterSpacing: 6,
+    color: '#191F28',
+  },
+  codeInput: {
+    minHeight: 56,
+    borderRadius: 16,
+    backgroundColor: '#F4F6F8',
+    paddingHorizontal: 20,
+    marginBottom: 12,
+    fontSize: 20,
+    fontWeight: '600',
+    letterSpacing: 4,
+    color: '#191F28',
+  },
+  friendError: {
+    marginTop: 20,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#F04452',
+    textAlign: 'center',
+  },
+  friendNote: {
+    marginTop: 12,
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#8B95A1',
+    textAlign: 'center',
+  },
+  friendBottom: { flex: 1, justifyContent: 'flex-end', paddingBottom: 20 },
   home: { flex: 1, paddingHorizontal: 20 },
   segmented: {
     marginTop: 22,
