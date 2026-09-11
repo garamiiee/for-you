@@ -5,7 +5,7 @@
     "target": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ESNext"],
-    "types": ["react-native"],
+    "types": ["react-native", "jest"],
     "jsx": "react-native",
     "resolveJsonModule": true,
     "esModuleInterop": true,
@@ -20,5 +20,8 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true
   },
-  "include": ["**/*.ts", "**/*.tsx"]
+  "include": ["**/*.ts", "**/*.tsx"],
+  // server/ 는 Node(Vercel) 런타임이라 앱과 타입 환경이 달라요.
+  // 자체 tsconfig 로 따로 검사해요. (cd server && npm run typecheck)
+  "exclude": ["server"]
 }
