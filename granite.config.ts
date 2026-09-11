@@ -7,11 +7,15 @@ export default defineConfig({
   plugins: [
     appsInToss({
       brand: {
-        displayName: '오다 주웠어..',
+        displayName: '오다 주웠어',
         primaryColor: '#FF5F95',
-        icon: '', // 화면에 노출될 앱의 아이콘 이미지 주소로 바꿔주세요.
+        // 콘솔 앱 정보등록에 올린 로고와 같은 이미지예요 (600x600 PNG).
+        icon: 'https://static.toss.im/appsintoss/78871/f681d39f-cf79-44da-afa3-837daa293103.png',
       },
-      permissions: [{ name: 'photos', access: 'read' }],
+      permissions: [
+        { name: 'photos', access: 'read' },
+        { name: 'camera', access: 'access' },
+      ],
     }),
   ],
 });
