@@ -16,6 +16,7 @@ export interface Gift {
   id: string;
   imageUrl: string;
   message: string;
+  recipientName?: string;
   createdAt: string;
 }
 
@@ -28,15 +29,22 @@ export interface GiftBox {
 export async function sendGift(
   imageUri: string,
   message: string,
+  recipientName = '',
 ): Promise<Gift> {
-  if (!isApiConfigured()) return sendMockGift(imageUri, message);
+  if (!isApiConfigured()) return sendMockGift(imageUri, message, recipientName);
 
   const userId = await getUserId();
-  return callFunction<Gift>(
+  const gift = await callFunction<Gift>(
     'gifts',
-    { action: 'send-gift', userId, image: stripDataUrl(imageUri), message },
+    {
+      action: 'send-gift',
+      userId,
+      image: stripDataUrl(imageUri),
+      message: packMessage(message, recipientName),
+    },
     SEND_TIMEOUT_MS,
   );
+  return unpackGift(gift);
 }
 
 /** 주고받은 선물을 모두 가져와요. */
@@ -44,11 +52,15 @@ export async function listGifts(): Promise<GiftBox> {
   if (!isApiConfigured()) return readMockGifts();
 
   const userId = await getUserId();
-  return callFunction<GiftBox>(
+  const box = await callFunction<GiftBox>(
     'gifts',
     { action: 'list-gifts', userId },
     LIST_TIMEOUT_MS,
   );
+  return {
+    received: box.received.map(unpackGift),
+    sent: box.sent.map(unpackGift),
+  };
 }
 
 /** 오늘 보낸 선물을 취소해요. 취소하면 오늘 다시 보낼 수 있어요. */
@@ -73,6 +85,30 @@ function stripDataUrl(imageUri: string) {
   return imageUri.replace(/^data:image\/\w+;base64,/, '');
 }
 
+// 기존 서버/DB 구조를 바꾸지 않고도 받는 사람 이름을 선물과 함께 보관해요.
+const RECIPIENT_SEPARATOR = '\u2063';
+
+function packMessage(message: string, recipientName: string) {
+  const name = recipientName.trim();
+  const trimmedMessage = message.trim();
+  return name
+    ? `${RECIPIENT_SEPARATOR}${name}${RECIPIENT_SEPARATOR}${trimmedMessage}`
+    : trimmedMessage;
+}
+
+function unpackGift(gift: Gift): Gift {
+  if (!gift.message.startsWith(RECIPIENT_SEPARATOR)) return gift;
+
+  const separatorIndex = gift.message.indexOf(RECIPIENT_SEPARATOR, 1);
+  if (separatorIndex < 0) return gift;
+
+  return {
+    ...gift,
+    recipientName: gift.message.slice(1, separatorIndex),
+    message: gift.message.slice(separatorIndex + 1),
+  };
+}
+
 /** 한국 시간 기준 날짜(YYYY-MM-DD)로 바꿔요. */
 function kstDateKey(date: Date) {
   const kst = new Date(date.getTime() + 9 * 60 * 60 * 1000);
@@ -83,7 +119,11 @@ function kstDateKey(date: Date) {
 // 서버 설정 전 목업. 이 기기에만 저장돼요.
 // ---------------------------------------------------------------------------
 
-async function sendMockGift(imageUri: string, message: string): Promise<Gift> {
+async function sendMockGift(
+  imageUri: string,
+  message: string,
+  recipientName: string,
+): Promise<Gift> {
   const trimmed = message.trim();
   if (trimmed.length === 0) {
     throw new ApiError('함께 보낼 메시지를 적어주세요.');
@@ -98,6 +138,7 @@ async function sendMockGift(imageUri: string, message: string): Promise<Gift> {
     id: `mock_${Date.now().toString(36)}`,
     imageUrl: imageUri,
     message: trimmed,
+    recipientName: recipientName.trim() || undefined,
     createdAt: new Date().toISOString(),
   };
 

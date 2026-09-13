@@ -344,13 +344,13 @@ describe('친구 연결 흐름', () => {
     expect(screen.getByText('친구와 선물함을 연결해요')).toBeTruthy();
   });
 
-  it('이미 연결된 상태로 친구 화면에 들어가면 연결 완료 화면이 보인다', async () => {
+  it('이미 연결된 상태에서 친구 변경을 누르면 준비 중 화면이 보인다', async () => {
     getFriend.mockResolvedValue({ id: 'bob', connectedAt: '2026-09-11' });
     render(<ForYouPage />);
 
     await press('선물할 친구를 변경하고 싶어요 〉');
 
-    expect(screen.getByText('이미 친구와 연결됐어요')).toBeTruthy();
+    expect(screen.getByText('서비스를 준비 중이에요')).toBeTruthy();
     expect(screen.queryByText('초대 코드 만들기')).toBeNull();
   });
 
@@ -386,6 +386,7 @@ describe('선물 보내기 흐름', () => {
       id: string;
       imageUrl: string;
       message: string;
+      recipientName?: string;
       createdAt: string;
     }> = {},
   ) => ({
@@ -458,6 +459,24 @@ describe('선물 보내기 흐름', () => {
     );
   });
 
+  it('선물을 누르면 그 선물과 함께 보낸 메시지를 보여준다', async () => {
+    listGifts.mockResolvedValue({
+      received: [
+        gift({ id: 'r1', message: '감기 조심해!', recipientName: '민서' }),
+      ],
+      sent: [],
+    });
+    render(<ForYouPage />);
+
+    const giftButton = await screen.findByLabelText('선물 메시지 열기');
+    await act(async () => {
+      fireEvent.press(giftButton);
+    });
+
+    expect(screen.getByText('To. 민서 ..♥')).toBeTruthy();
+    expect(screen.getByText('감기 조심해!')).toBeTruthy();
+  });
+
   it('선물이 없으면 시작 안내를 보여준다', async () => {
     render(<ForYouPage />);
     expect(
@@ -496,7 +515,7 @@ describe('선물 보내기 흐름', () => {
     await press('이대로 보낼래요');
 
     await waitFor(() =>
-      expect(sendGift).toHaveBeenCalledWith(CUTOUT, '낙엽 주웠어'),
+      expect(sendGift).toHaveBeenCalledWith(CUTOUT, '낙엽 주웠어', ''),
     );
     expect(listGifts).toHaveBeenCalledTimes(2); // 최초 로드 + 전송 후 갱신
     expect(screen.getByText('오늘 선물도 잘 두고 왔어요.')).toBeTruthy();

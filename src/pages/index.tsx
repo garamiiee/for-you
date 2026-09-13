@@ -6,16 +6,21 @@ import {
 } from '@apps-in-toss/framework';
 import { createRoute } from '@granite-js/react-native';
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Alert,
+  Animated,
+  AppState,
+  Easing,
   Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -33,6 +38,7 @@ import {
   shareInvite,
 } from '../lib/friends';
 import {
+  type Gift,
   type GiftBox,
   deleteTodayGift,
   hasSentToday,
@@ -40,14 +46,9 @@ import {
   sendGift,
 } from '../lib/gifts';
 
-const leafHome = require('../../assets/leaf-home.png');
-const coffee = require('../../assets/coffee.png');
-const blueberry = require('../../assets/blueberry.png');
-const candy = require('../../assets/candy.png');
 const leafLarge = require('../../assets/leaf-large.png');
-const extractLoading = require('../../assets/extract-loading.png');
 const extractFailed = require('../../assets/extract-failed.png');
-const sendingArtwork = require('../../assets/sending.png');
+const deliveryGiftArtwork = require('../../assets/gift-delivery.png');
 
 type AppScreen =
   | 'home'
@@ -76,7 +77,7 @@ function ForYouPage() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [giftBox, setGiftBox] = useState<GiftBox>({ received: [], sent: [] });
   const [message, setMessage] = useState('');
-  const [recipientName, setRecipientName] = useState('민서');
+  const [recipientName, setRecipientName] = useState('');
   const [lastPhotoBase64, setLastPhotoBase64] = useState<string | null>(null);
   const [selectedPhotoUri, setSelectedPhotoUri] = useState<string | null>(null);
   const [friend, setFriend] = useState<Friend | null>(null);
@@ -84,12 +85,22 @@ function ForYouPage() {
   const [codeInput, setCodeInput] = useState('');
   const [friendBusy, setFriendBusy] = useState(false);
   const [friendError, setFriendError] = useState<string | null>(null);
+  const [giftLoadError, setGiftLoadError] = useState(false);
+  const [selectedGift, setSelectedGift] = useState<Gift | null>(null);
 
   const receivedGiftCount = giftBox.received.length;
   const togetherGiftCount = receivedGiftCount + giftBox.sent.length;
   const dailySent = hasSentToday(giftBox.sent);
-  const latestReceivedUri = giftBox.received[0]?.imageUrl ?? null;
-  const latestSentUri = giftBox.sent[0]?.imageUrl ?? null;
+  const visibleGifts =
+    tab === 'received'
+      ? [...giftBox.received].sort(
+          (a, b) =>
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+        )
+      : [...giftBox.received, ...giftBox.sent].sort(
+          (a, b) =>
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+        );
   const headline = getStorageHeadline(
     tab,
     receivedGiftCount,
@@ -105,14 +116,6 @@ function ForYouPage() {
       })
       .catch((error) => {
         console.error('[friends] 친구 조회 실패', error);
-      });
-
-    listGifts()
-      .then((loaded) => {
-        if (!cancelled) setGiftBox(loaded);
-      })
-      .catch((error) => {
-        console.error('[gifts] 목록 조회 실패', error);
       });
 
     return () => {
@@ -201,10 +204,54 @@ function ForYouPage() {
   const refreshGifts = async () => {
     try {
       setGiftBox(await listGifts());
+      setGiftLoadError(false);
     } catch (error) {
+      setGiftLoadError(true);
       console.error('[gifts] 목록 조회 실패', error);
     }
   };
+
+  useEffect(() => {
+    let refreshing = false;
+
+    const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        setGiftBox(await listGifts());
+        setGiftLoadError(false);
+      } catch (error) {
+        setGiftLoadError(true);
+        console.error('[gifts] 새 선물 확인 실패', error);
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    const interval = setInterval(refresh, 5000);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') refresh();
+    });
+
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'received' && tab !== 'together') return;
+
+    listGifts()
+      .then((loaded) => {
+        setGiftBox(loaded);
+        setGiftLoadError(false);
+      })
+      .catch((error) => {
+        setGiftLoadError(true);
+        console.error('[gifts] 탭 진입 새로고침 실패', error);
+      });
+  }, [tab]);
 
   const submitGift = async () => {
     if (selectedPhotoUri == null) return;
@@ -212,7 +259,7 @@ function ForYouPage() {
     setScreen('sending');
 
     try {
-      await sendGift(selectedPhotoUri, message);
+      await sendGift(selectedPhotoUri, message, recipientName);
       await refreshGifts();
       setScreen('sent');
     } catch (error) {
@@ -317,10 +364,17 @@ function ForYouPage() {
 
   if (screen === 'extracting') {
     return (
-      <FullArtwork
-        source={extractLoading}
-        fallbackText="오브젝트를 추출 중이에요 ..."
-      />
+      <SafeAreaView style={styles.extractionScreen}>
+        <View style={styles.extractionContent}>
+          <ActivityIndicator size="large" color="#FF5F95" />
+          <Text style={styles.extractionTitle}>
+            오브젝트를 추출 중이에요 ...
+          </Text>
+          <Text style={styles.extractionDescription}>
+            사진에서 선물할 물건만 꺼내고 있어요
+          </Text>
+        </View>
+      </SafeAreaView>
     );
   }
 
@@ -409,8 +463,6 @@ function ForYouPage() {
               <TextInput
                 value={recipientName}
                 onChangeText={setRecipientName}
-                placeholder="받는 사람"
-                placeholderTextColor="#9AA3AE"
                 maxLength={12}
                 style={styles.recipientInput}
               />
@@ -488,23 +540,7 @@ function ForYouPage() {
   }
 
   if (screen === 'sending' || screen === 'sent') {
-    return (
-      <SafeAreaView style={styles.progressScreen}>
-        <Text style={styles.progressTitle}>
-          {screen === 'sending'
-            ? '선물을 보내는 중이에요..'
-            : '오늘 선물도 잘 두고 왔어요.'}
-        </Text>
-        <Image
-          source={sendingArtwork}
-          style={styles.sendingArtwork}
-          resizeMode="contain"
-        />
-        {screen === 'sending' && (
-          <ActivityIndicator color="#FF5F95" style={styles.progressSpinner} />
-        )}
-      </SafeAreaView>
-    );
+    return <DeliveryProgress isSending={screen === 'sending'} />;
   }
 
   return (
@@ -512,14 +548,15 @@ function ForYouPage() {
       <View style={styles.home}>
         <SegmentedControl tab={tab} onChange={setTab} />
         <Text style={styles.homeHeadline}>{headline}</Text>
+        {giftLoadError && (
+          <Text style={styles.giftLoadError}>
+            선물함을 불러오지 못했어요. 잠시 후 다시 확인할게요.
+          </Text>
+        )}
         <GiftStorage
-          showShared={tab === 'together'}
-          giftCount={tab === 'received' ? receivedGiftCount : togetherGiftCount}
-          giftImageUri={
-            tab === 'received'
-              ? latestReceivedUri
-              : (latestSentUri ?? latestReceivedUri)
-          }
+          key={`${tab}:${visibleGifts.map((gift) => gift.id).join(',')}`}
+          gifts={visibleGifts}
+          onSelectGift={setSelectedGift}
         />
         <View style={styles.homeBottom}>
           {/*
@@ -550,6 +587,10 @@ function ForYouPage() {
         onCamera={takePhoto}
         onAlbum={selectPhotoFromAlbum}
         onDeleteTodayGift={cancelTodayGift}
+      />
+      <GiftMessageModal
+        gift={selectedGift}
+        onClose={() => setSelectedGift(null)}
       />
     </AppScaffold>
   );
@@ -583,9 +624,9 @@ function FriendScreen({
   if (friend != null) {
     return (
       <View style={styles.friendScreen}>
-        <Text style={styles.screenTitle}>이미 친구와 연결됐어요</Text>
+        <Text style={styles.screenTitle}>서비스를 준비 중이에요</Text>
         <Text style={styles.friendNote}>
-          연결한 친구와만 선물을 주고받아요.
+          선물할 친구를 변경하는 기능은 곧 만날 수 있어요.
         </Text>
         <View style={styles.friendBottom}>
           <Pressable style={styles.wideButton} onPress={onBack}>
@@ -747,43 +788,145 @@ function SegmentedControl({
 }
 
 function GiftStorage({
-  showShared,
-  giftCount,
-  giftImageUri,
-}: { showShared: boolean; giftCount: number; giftImageUri: string | null }) {
-  const hasGift = giftCount > 0;
-
+  gifts,
+  onSelectGift,
+}: { gifts: Gift[]; onSelectGift: (gift: Gift) => void }) {
   return (
     <View style={styles.storage}>
       <View style={styles.storageGradient} />
       <View style={styles.storageBottom} />
-      {hasGift && (
-        <>
-          <Image
-            source={giftImageUri == null ? leafHome : { uri: giftImageUri }}
-            style={styles.leaf}
-            resizeMode="contain"
-          />
-          {giftCount > 1 && (
-            <Image source={coffee} style={styles.coffee} resizeMode="contain" />
-          )}
-          {giftCount > 2 && (
-            <Image
-              source={blueberry}
-              style={styles.blueberry}
-              resizeMode="contain"
-            />
-          )}
-          {giftCount > 3 && (
-            <Image source={candy} style={styles.candy} resizeMode="contain" />
-          )}
-          {showShared && (
-            <Text style={styles.sharedBadge}>+ 내가 보낸 선물</Text>
-          )}
-        </>
+      {gifts.length > 0 && (
+        <ScrollView
+          style={styles.giftScroll}
+          contentContainerStyle={styles.giftScrollContent}
+          showsVerticalScrollIndicator
+          indicatorStyle="black"
+        >
+          <FallingGifts gifts={gifts} onSelectGift={onSelectGift} />
+        </ScrollView>
       )}
     </View>
   );
+}
+
+function FallingGifts({
+  gifts,
+  onSelectGift,
+}: { gifts: Gift[]; onSelectGift: (gift: Gift) => void }) {
+  const drops = useRef(gifts.map(() => new Animated.Value(-380))).current;
+  const placements = createGravityPlacements(gifts, 292);
+  const highestPoint = placements.reduce(
+    (highest, placement) =>
+      Math.max(highest, placement.bottom + placement.size),
+    0,
+  );
+  const canvasHeight = Math.max(309, highestPoint + 10);
+
+  useEffect(() => {
+    const animation = Animated.stagger(
+      100,
+      drops.map((drop) =>
+        Animated.timing(drop, {
+          toValue: 0,
+          duration: 430,
+          easing: Easing.in(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ),
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [drops]);
+
+  return (
+    <View style={[styles.giftCanvas, { height: canvasHeight }]}>
+      {gifts.map((gift, index) => {
+        const drop = drops[index];
+        if (drop == null) return null;
+
+        const placement = placements[index];
+        if (placement == null) return null;
+        return (
+          <Animated.View
+            key={gift.id}
+            style={[
+              styles.fallingGift,
+              {
+                width: placement.size,
+                height: placement.size,
+                left: placement.left,
+                bottom: placement.bottom,
+                zIndex: index + 2,
+                transform: [
+                  { translateY: drop },
+                  { rotate: `${placement.rotation}deg` },
+                ],
+              },
+            ]}
+          >
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="선물 메시지 열기"
+              style={styles.giftPressable}
+              onPress={() => onSelectGift(gift)}
+            >
+              <Image
+                source={{ uri: gift.imageUrl }}
+                resizeMode="contain"
+                style={styles.giftImage}
+              />
+            </Pressable>
+          </Animated.View>
+        );
+      })}
+    </View>
+  );
+}
+
+function createGravityPlacements(gifts: Gift[], storageWidth: number) {
+  const gap = 3;
+  const placed: Array<{ centerX: number; centerY: number; radius: number }> =
+    [];
+
+  return gifts.map((gift, index) => {
+    const sizeRandom = seededNumber(`${gift.id}:size`);
+    const positionRandom = seededNumber(`${gift.id}:${index}:position`);
+    const rotationRandom = seededNumber(`${gift.id}:rotation`);
+    const size = Math.round(90 + sizeRandom * 24);
+    const radius = size / 2;
+    const centerX = radius + positionRandom * (storageWidth - size);
+    let centerY = radius + 7;
+
+    for (const other of placed) {
+      const distanceX = Math.abs(centerX - other.centerX);
+      const collisionDistance = radius + other.radius + gap;
+      if (distanceX >= collisionDistance) continue;
+      const restingHeight = Math.sqrt(
+        Math.max(
+          0,
+          collisionDistance * collisionDistance - distanceX * distanceX,
+        ),
+      );
+      centerY = Math.max(centerY, other.centerY + restingHeight);
+    }
+
+    placed.push({ centerX, centerY, radius });
+    return {
+      size,
+      left: centerX - radius,
+      bottom: centerY - radius,
+      rotation: Math.round(rotationRandom * 24 - 12),
+    };
+  });
+}
+
+function seededNumber(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
 }
 
 function PhotoPicker({
@@ -844,6 +987,137 @@ function PhotoPicker({
   );
 }
 
+function DeliveryProgress({ isSending }: { isSending: boolean }) {
+  const jump = useRef(new Animated.Value(0)).current;
+  const [reduceMotion, setReduceMotion] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
+      if (mounted) setReduceMotion(enabled);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    jump.stopAnimation();
+    jump.setValue(0);
+    if (!isSending || reduceMotion) return;
+
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(jump, {
+          toValue: -44,
+          duration: 330,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(jump, {
+          toValue: 0,
+          duration: 360,
+          easing: Easing.in(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.delay(140),
+      ]),
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [isSending, jump, reduceMotion]);
+
+  const shadowScale = jump.interpolate({
+    inputRange: [-44, 0],
+    outputRange: [0.67, 1],
+  });
+  const shadowOpacity = jump.interpolate({
+    inputRange: [-44, 0],
+    outputRange: [0.12, 0.22],
+  });
+
+  return (
+    <SafeAreaView style={styles.progressScreen}>
+      <Text style={styles.progressTitle}>
+        {isSending
+          ? '선물을 보내는 중이에요..'
+          : '오늘 선물도 잘 두고 왔어요.'}
+      </Text>
+      <View
+        style={styles.deliveryStage}
+        accessibilityLabel={isSending ? '점프하는 선물' : '도착한 선물'}
+      >
+        <Animated.Image
+          source={deliveryGiftArtwork}
+          style={[
+            styles.deliveryGift,
+            { transform: [{ translateY: isSending ? jump : 0 }] },
+          ]}
+          resizeMode="contain"
+        />
+        <Animated.View
+          style={[
+            styles.deliveryShadow,
+            {
+              opacity: isSending ? shadowOpacity : 0.22,
+              transform: [{ scaleX: isSending ? shadowScale : 1 }],
+            },
+          ]}
+        />
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function GiftMessageModal({
+  gift,
+  onClose,
+}: { gift: Gift | null; onClose: () => void }) {
+  return (
+    <Modal
+      visible={gift != null}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <Pressable style={styles.giftModalBackdrop} onPress={onClose}>
+        <Pressable style={styles.giftMessageCard} onPress={() => undefined}>
+          <View style={styles.giftMessageHeader}>
+            <Text style={styles.giftMessageTitle}>
+              To. {gift?.recipientName ? `${gift.recipientName} ` : ''}..♥
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="메시지 닫기"
+              hitSlop={12}
+              onPress={onClose}
+            >
+              <Text style={styles.giftMessageClose}>×</Text>
+            </Pressable>
+          </View>
+          <View style={styles.giftMessageBodyBox}>
+            <Text style={styles.giftMessageBody}>
+              {gift?.message || '함께 보낸 메시지가 없어요.'}
+            </Text>
+          </View>
+          {gift != null && (
+            <Text style={styles.giftMessageDate}>
+              {formatGiftDate(gift.createdAt)}
+            </Text>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+function formatGiftDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (part: number) => part.toString().padStart(2, '0');
+  return `${date.getFullYear()}.${pad(date.getMonth() + 1)}.${pad(date.getDate())}`;
+}
+
 function MessageCard({
   recipientName,
   message,
@@ -854,24 +1128,6 @@ function MessageCard({
       <View style={styles.messageBox}>
         <Text style={styles.messageBody}>{message}</Text>
       </View>
-    </View>
-  );
-}
-
-function FullArtwork({
-  source,
-  fallbackText,
-}: { source: number; fallbackText: string }) {
-  return (
-    <View style={styles.fullScreen}>
-      <Image
-        source={source}
-        style={StyleSheet.absoluteFillObject}
-        resizeMode="cover"
-      />
-      <Text accessibilityLabel={fallbackText} style={styles.hiddenText}>
-        {fallbackText}
-      </Text>
     </View>
   );
 }
@@ -962,13 +1218,20 @@ const styles = StyleSheet.create({
     lineHeight: 23,
     fontWeight: '700',
   },
+  giftLoadError: {
+    marginTop: 8,
+    color: '#F04452',
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
   storage: {
     position: 'relative',
     alignSelf: 'center',
     width: 310,
     height: 329,
     marginTop: 64,
-    overflow: 'visible',
+    overflow: 'hidden',
     borderLeftWidth: 9,
     borderRightWidth: 9,
     borderBottomWidth: 10,
@@ -988,50 +1251,64 @@ const styles = StyleSheet.create({
     height: 70,
     backgroundColor: '#FEF8F8',
   },
-  leaf: {
+  fallingGift: {
     position: 'absolute',
-    left: 4,
-    bottom: -5,
-    width: 120,
-    height: 126,
-    zIndex: 3,
   },
-  coffee: {
-    position: 'absolute',
-    left: 61,
-    bottom: -22,
-    width: 166,
-    height: 166,
-    zIndex: 4,
+  giftPressable: { flex: 1 },
+  giftImage: { width: '100%', height: '100%' },
+  giftScroll: { ...StyleSheet.absoluteFillObject },
+  giftScrollContent: { flexGrow: 1 },
+  giftCanvas: { position: 'relative', width: 292 },
+  giftModalBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.32)',
   },
-  blueberry: {
-    position: 'absolute',
-    right: 4,
-    bottom: -14,
-    width: 92,
-    height: 115,
-    zIndex: 5,
+  giftMessageCard: {
+    borderRadius: 18,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 18,
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 18,
+    elevation: 5,
   },
-  candy: {
-    position: 'absolute',
-    right: -4,
-    bottom: 31,
-    width: 138,
-    height: 154,
-    zIndex: 2,
-    transform: [{ rotate: '12deg' }],
+  giftMessageHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 22,
   },
-  sharedBadge: {
-    position: 'absolute',
-    right: 10,
-    top: 12,
-    borderRadius: 12,
-    backgroundColor: '#FFEBF1',
-    color: '#D6336C',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    fontSize: 11,
-    overflow: 'hidden',
+  giftMessageTitle: { color: '#333D4B', fontSize: 17, fontWeight: '700' },
+  giftMessageClose: {
+    color: '#B0B8C1',
+    fontSize: 32,
+    fontWeight: '300',
+    lineHeight: 32,
+  },
+  giftMessageBodyBox: {
+    minHeight: 112,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#DDE1E6',
+    borderRadius: 14,
+    padding: 18,
+    backgroundColor: '#FBFCFD',
+  },
+  giftMessageBody: {
+    color: '#4E5968',
+    fontSize: 17,
+    fontWeight: '500',
+    lineHeight: 27,
+  },
+  giftMessageDate: {
+    marginTop: 12,
+    color: '#8B95A1',
+    fontSize: 13,
   },
   homeBottom: { marginTop: 'auto', paddingBottom: 7 },
   wideButton: {
@@ -1160,17 +1437,60 @@ const styles = StyleSheet.create({
   progressScreen: {
     flex: 1,
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#F9FAFB',
   },
   progressTitle: {
-    marginTop: -60,
-    fontSize: 18,
+    marginTop: 110,
+    fontSize: 17,
+    lineHeight: 23,
     fontWeight: '700',
-    color: '#111111',
+    color: '#000000',
+    textAlign: 'center',
   },
-  sendingArtwork: { width: 220, height: 260, marginTop: 22 },
-  progressSpinner: { marginTop: -65 },
+  deliveryStage: {
+    position: 'relative',
+    width: 190,
+    height: 215,
+    marginTop: 82,
+    alignItems: 'center',
+  },
+  deliveryGift: {
+    position: 'absolute',
+    top: 44,
+    width: 145,
+    height: 145,
+    zIndex: 1,
+  },
+  deliveryShadow: {
+    position: 'absolute',
+    top: 175,
+    width: 163,
+    height: 18,
+    borderRadius: 99,
+    backgroundColor: '#7D7D7D',
+  },
+  extractionScreen: { flex: 1, backgroundColor: '#FFFFFF' },
+  extractionContent: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  extractionTitle: {
+    marginTop: 24,
+    color: '#191F28',
+    fontSize: 20,
+    lineHeight: 28,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  extractionDescription: {
+    marginTop: 10,
+    color: '#8B95A1',
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
   modalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.18)',

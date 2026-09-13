@@ -72,6 +72,30 @@ describe('서버가 연결된 경우', () => {
     );
   });
 
+  it('받는 사람 이름을 선물에 함께 저장하고 목록에서 다시 꺼낸다', async () => {
+    const { gifts, config } = loadGifts();
+    config.callFunction.mockResolvedValue(
+      gift({ message: '\u2063민서\u2063감기 조심해!' }),
+    );
+
+    const sent = await gifts.sendGift(CUTOUT, '감기 조심해!', ' 민서 ');
+    expect(sent.recipientName).toBe('민서');
+    expect(sent.message).toBe('감기 조심해!');
+    expect(config.callFunction.mock.calls[0][1].message).toBe(
+      '\u2063민서\u2063감기 조심해!',
+    );
+
+    config.callFunction.mockResolvedValue({
+      received: [gift({ message: '\u2063민서\u2063따뜻하게 입어!' })],
+      sent: [],
+    });
+    const box = await gifts.listGifts();
+    expect(box.received[0]).toMatchObject({
+      recipientName: '민서',
+      message: '따뜻하게 입어!',
+    });
+  });
+
   it('목록과 취소도 올바른 본문으로 호출된다', async () => {
     const { gifts, config } = loadGifts();
 
